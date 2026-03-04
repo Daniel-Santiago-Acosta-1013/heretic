@@ -4,6 +4,7 @@
 import math
 import os
 import sys
+import threading
 import time
 import warnings
 from dataclasses import asdict
@@ -135,6 +136,33 @@ def run():
         and "PYTORCH_CUDA_ALLOC_CONF" not in os.environ
     ):
         os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
+
+    def run_with_heartbeat(step: str, operation):
+        """
+        Runs a potentially long operation while printing periodic progress updates.
+        """
+        start_time = time.perf_counter()
+        done = threading.Event()
+
+        def heartbeat():
+            while not done.wait(15):
+                elapsed = time.perf_counter() - start_time
+                print(
+                    f"  * [grey50]{step} still running... [bold]{format_duration(elapsed)}[/] elapsed[/]"
+                )
+
+        thread = threading.Thread(target=heartbeat, daemon=True)
+        thread.start()
+
+        try:
+            result = operation()
+        finally:
+            done.set()
+            thread.join(timeout=0.2)
+
+        elapsed = time.perf_counter() - start_time
+        print(f"  * {step} completed in [bold]{format_duration(elapsed)}[/]")
+        return result
 
     # Modified "Pagga" font from https://budavariam.github.io/asciiart-text/
     print(f"[cyan]█░█░█▀▀░█▀▄░█▀▀░▀█▀░█░█▀▀[/]  v{version('heretic-llm')}")
@@ -345,10 +373,16 @@ def run():
 
             try:
                 # Warmup run to build the computation graph so that part isn't benchmarked.
-                model.get_responses(prompts)
+                run_with_heartbeat(
+                    "Warmup run",
+                    lambda: model.get_responses(prompts),
+                )
 
                 start_time = time.perf_counter()
-                responses = model.get_responses(prompts)
+                responses = run_with_heartbeat(
+                    "Benchmark run",
+                    lambda: model.get_responses(prompts),
+                )
                 end_time = time.perf_counter()
             except Exception as error:
                 if batch_size == 1:
@@ -378,7 +412,14 @@ def run():
     print()
     print("Checking for common response prefix...")
     prefix_check_prompts = good_prompts[:100] + bad_prompts[:100]
-    responses = model.get_responses_batched(prefix_check_prompts)
+    responses = run_with_heartbeat(
+        "Prefix check",
+        lambda: model.get_responses_batched(
+            prefix_check_prompts,
+            show_progress=True,
+            progress_label="Prefix check",
+        ),
+    )
 
     # Despite being located in os.path, commonprefix actually performs
     # a naive string operation without any path-specific logic,
@@ -416,7 +457,14 @@ def run():
 
     if recheck_prefix:
         print("* Rechecking with prefix...")
-        responses = model.get_responses_batched(prefix_check_prompts)
+        responses = run_with_heartbeat(
+            "Prefix recheck",
+            lambda: model.get_responses_batched(
+                prefix_check_prompts,
+                show_progress=True,
+                progress_label="Prefix recheck",
+            ),
+        )
         additional_prefix = commonprefix(responses).rstrip(" ")
         if additional_prefix:
             model.response_prefix += additional_prefix
@@ -436,9 +484,23 @@ def run():
     print()
     print("Calculating per-layer refusal directions...")
     print("* Obtaining residuals for good prompts...")
-    good_residuals = model.get_residuals_batched(good_prompts)
+    good_residuals = run_with_heartbeat(
+        "Residual extraction (good prompts)",
+        lambda: model.get_residuals_batched(
+            good_prompts,
+            show_progress=True,
+            progress_label="Good residuals",
+        ),
+    )
     print("* Obtaining residuals for bad prompts...")
-    bad_residuals = model.get_residuals_batched(bad_prompts)
+    bad_residuals = run_with_heartbeat(
+        "Residual extraction (bad prompts)",
+        lambda: model.get_residuals_batched(
+            bad_prompts,
+            show_progress=True,
+            progress_label="Bad residuals",
+        ),
+    )
 
     good_means = good_residuals.mean(dim=0)
     bad_means = bad_residuals.mean(dim=0)

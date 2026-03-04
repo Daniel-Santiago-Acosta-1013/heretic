@@ -2,6 +2,7 @@
 # Copyright (C) 2025-2026  Philipp Emanuel Weidmann <pew@worldwidemann.com> + contributors
 
 import math
+import time
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any, Type, cast
@@ -30,7 +31,7 @@ from transformers.generation import (
 )
 
 from .config import QuantizationMethod, RowNormalization, Settings
-from .utils import Prompt, batchify, empty_cache, print
+from .utils import Prompt, batchify, empty_cache, format_duration, print
 
 
 def get_model_class(
@@ -340,9 +341,18 @@ class Model:
                     f"Unexpected Tensor in {component} - expected nn.Module"
                 )
 
-        # Exceptions aren't suppressed here, because there is currently
-        # no alternative location for the attention out-projection.
-        try_add("attn.o_proj", layer.self_attn.o_proj)  # ty:ignore[possibly-missing-attribute]
+        # Attention output projection can live at different paths depending on
+        # architecture (e.g. Qwen3.5 linear-attention layers use linear_attn.out_proj).
+        # Pick the first matching path to avoid attaching duplicate LoRA modules.
+        for parent, child in [
+            ("self_attn", "o_proj"),
+            ("linear_attn", "out_proj"),
+        ]:
+            with suppress(Exception):
+                module = getattr(getattr(layer, parent), child)
+                if isinstance(module, Module):
+                    try_add("attn.o_proj", module)
+                    break
 
         # Most dense models.
         with suppress(Exception):
@@ -588,15 +598,41 @@ class Model:
         self,
         prompts: list[Prompt],
         skip_special_tokens: bool = False,
+        show_progress: bool = False,
+        progress_label: str = "Responses",
     ) -> list[str]:
         responses = []
+        total_prompts = len(prompts)
 
-        for batch in batchify(prompts, self.settings.batch_size):
+        batch_size = self.settings.batch_size if self.settings.batch_size > 0 else 1
+        batches = batchify(prompts, batch_size)
+        total_batches = len(batches)
+        start_time = time.perf_counter()
+        processed_prompts = 0
+        # Cap progress output to ~20 lines per stage to avoid excessive logging.
+        progress_step = max(1, total_batches // 20) if total_batches > 1 else 1
+
+        for i, batch in enumerate(batches, start=1):
             for response in self.get_responses(
                 batch,
                 skip_special_tokens=skip_special_tokens,
             ):
                 responses.append(response)
+            processed_prompts += len(batch)
+
+            if show_progress and (
+                i == 1 or i == total_batches or i % progress_step == 0
+            ):
+                elapsed = time.perf_counter() - start_time
+                avg_batch_time = elapsed / i
+                eta_seconds = avg_batch_time * (total_batches - i)
+                print(
+                    (
+                        f"  * {progress_label}: batch [bold]{i}[/]/[bold]{total_batches}[/] "
+                        f"| prompts [bold]{processed_prompts}[/]/[bold]{total_prompts}[/] "
+                        f"| ETA ~[bold]{format_duration(eta_seconds)}[/]"
+                    )
+                )
 
         return responses
 
@@ -645,11 +681,39 @@ class Model:
 
         return residuals
 
-    def get_residuals_batched(self, prompts: list[Prompt]) -> Tensor:
+    def get_residuals_batched(
+        self,
+        prompts: list[Prompt],
+        show_progress: bool = False,
+        progress_label: str = "Residuals",
+    ) -> Tensor:
         residuals = []
+        total_prompts = len(prompts)
 
-        for batch in batchify(prompts, self.settings.batch_size):
+        batch_size = self.settings.batch_size if self.settings.batch_size > 0 else 1
+        batches = batchify(prompts, batch_size)
+        total_batches = len(batches)
+        start_time = time.perf_counter()
+        processed_prompts = 0
+        progress_step = max(1, total_batches // 20) if total_batches > 1 else 1
+
+        for i, batch in enumerate(batches, start=1):
             residuals.append(self.get_residuals(batch))
+            processed_prompts += len(batch)
+
+            if show_progress and (
+                i == 1 or i == total_batches or i % progress_step == 0
+            ):
+                elapsed = time.perf_counter() - start_time
+                avg_batch_time = elapsed / i
+                eta_seconds = avg_batch_time * (total_batches - i)
+                print(
+                    (
+                        f"  * {progress_label}: batch [bold]{i}[/]/[bold]{total_batches}[/] "
+                        f"| prompts [bold]{processed_prompts}[/]/[bold]{total_prompts}[/] "
+                        f"| ETA ~[bold]{format_duration(eta_seconds)}[/]"
+                    )
+                )
 
         return torch.cat(residuals, dim=0)
 
@@ -676,11 +740,39 @@ class Model:
         # The returned tensor has shape (prompt, token).
         return F.log_softmax(logits, dim=-1)
 
-    def get_logprobs_batched(self, prompts: list[Prompt]) -> Tensor:
+    def get_logprobs_batched(
+        self,
+        prompts: list[Prompt],
+        show_progress: bool = False,
+        progress_label: str = "Logprobs",
+    ) -> Tensor:
         logprobs = []
+        total_prompts = len(prompts)
 
-        for batch in batchify(prompts, self.settings.batch_size):
+        batch_size = self.settings.batch_size if self.settings.batch_size > 0 else 1
+        batches = batchify(prompts, batch_size)
+        total_batches = len(batches)
+        start_time = time.perf_counter()
+        processed_prompts = 0
+        progress_step = max(1, total_batches // 20) if total_batches > 1 else 1
+
+        for i, batch in enumerate(batches, start=1):
             logprobs.append(self.get_logprobs(batch))
+            processed_prompts += len(batch)
+
+            if show_progress and (
+                i == 1 or i == total_batches or i % progress_step == 0
+            ):
+                elapsed = time.perf_counter() - start_time
+                avg_batch_time = elapsed / i
+                eta_seconds = avg_batch_time * (total_batches - i)
+                print(
+                    (
+                        f"  * {progress_label}: batch [bold]{i}[/]/[bold]{total_batches}[/] "
+                        f"| prompts [bold]{processed_prompts}[/]/[bold]{total_prompts}[/] "
+                        f"| ETA ~[bold]{format_duration(eta_seconds)}[/]"
+                    )
+                )
 
         return torch.cat(logprobs, dim=0)
 

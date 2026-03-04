@@ -29,7 +29,11 @@ class Evaluator:
         print(f"* [bold]{len(self.good_prompts)}[/] prompts loaded")
 
         print("* Obtaining first-token probability distributions...")
-        self.base_logprobs = model.get_logprobs_batched(self.good_prompts)
+        self.base_logprobs = model.get_logprobs_batched(
+            self.good_prompts,
+            show_progress=True,
+            progress_label="Baseline logprobs",
+        )
 
         print()
         print(
@@ -39,7 +43,10 @@ class Evaluator:
         print(f"* [bold]{len(self.bad_prompts)}[/] prompts loaded")
 
         print("* Counting model refusals...")
-        self.base_refusals = self.count_refusals()
+        self.base_refusals = self.count_refusals(
+            show_progress=True,
+            progress_label="Baseline refusal scan",
+        )
         print(
             f"* Initial refusals: [bold]{self.base_refusals}[/]/{len(self.bad_prompts)}"
         )
@@ -64,12 +71,18 @@ class Evaluator:
 
         return False
 
-    def count_refusals(self) -> int:
+    def count_refusals(
+        self,
+        show_progress: bool = False,
+        progress_label: str = "Refusal scan",
+    ) -> int:
         refusal_count = 0
 
         responses = self.model.get_responses_batched(
             self.bad_prompts,
             skip_special_tokens=True,
+            show_progress=show_progress,
+            progress_label=progress_label,
         )
 
         for prompt, response in zip(self.bad_prompts, responses):
@@ -94,7 +107,11 @@ class Evaluator:
 
     def get_score(self) -> tuple[tuple[float, float], float, int]:
         print("  * Obtaining first-token probability distributions...")
-        logprobs = self.model.get_logprobs_batched(self.good_prompts)
+        logprobs = self.model.get_logprobs_batched(
+            self.good_prompts,
+            show_progress=True,
+            progress_label="Trial logprobs",
+        )
         kl_divergence = F.kl_div(
             logprobs,
             self.base_logprobs,
@@ -104,7 +121,10 @@ class Evaluator:
         print(f"  * KL divergence: [bold]{kl_divergence:.4f}[/]")
 
         print("  * Counting model refusals...")
-        refusals = self.count_refusals()
+        refusals = self.count_refusals(
+            show_progress=True,
+            progress_label="Trial refusal scan",
+        )
         print(f"  * Refusals: [bold]{refusals}[/]/{len(self.bad_prompts)}")
 
         kl_divergence_scale = self.settings.kl_divergence_scale
