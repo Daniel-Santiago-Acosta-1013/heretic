@@ -167,9 +167,16 @@ class Model:
         # but this is harmless as we only abliterate the modules we target in `abliterate()`,
         # leaving the others at their default (identity) state.
         # NOTE: This will need to be updated when hybrid layer support (#43) is merged.
-        target_modules = [
+        target_modules = {
             comp.split(".")[-1] for comp in self.get_abliterable_components()
-        ]
+        }
+        # Qwen3.5 linear-attention layers expose the projection as `out_proj`
+        # rather than `o_proj`. Add that leaf target when present so those
+        # modules are LoRA-wrapped as well.
+        with suppress(Exception):
+            if isinstance(self.get_layers()[0].linear_attn.out_proj, Module):  # ty:ignore[possibly-missing-attribute]
+                target_modules.add("out_proj")
+        target_modules = sorted(target_modules)
 
         if self.settings.row_normalization != RowNormalization.FULL:
             # Rank 1 is sufficient for directional ablation without renormalization.
@@ -452,12 +459,32 @@ class Model:
                     # and move to the correct device.
                     v = layer_refusal_direction.to(module.weight.device)
 
+                    # We expect LoRA-wrapped PEFT modules here. If wrapping failed for any
+                    # matched module, fail with a precise message instead of an opaque
+                    # attribute error on `base_layer`.
+                    if not (hasattr(module, "lora_A") and hasattr(module, "lora_B")):
+                        raise RuntimeError(
+                            (
+                                f"Module for component '{component}' in layer {layer_index} "
+                                f"was not LoRA-wrapped (type: {type(module).__name__}). "
+                                "Check target_modules mapping in _apply_lora()."
+                            )
+                        )
+
                     # Get W (dequantize if necessary).
                     #
                     # FIXME: This cast is valid only under the assumption that the original
                     #        module wrapped by the LoRA adapter has a weight attribute.
                     #        See the comment above for why this is currently not guaranteed.
-                    base_weight = cast(Tensor, module.base_layer.weight)
+                    base_layer = getattr(module, "base_layer", module)
+                    if not hasattr(base_layer, "weight"):
+                        raise RuntimeError(
+                            (
+                                f"Unable to find weight tensor for component '{component}' "
+                                f"in layer {layer_index} (type: {type(module).__name__})."
+                            )
+                        )
+                    base_weight = cast(Tensor, base_layer.weight)
                     quant_state = getattr(base_weight, "quant_state", None)
 
                     if quant_state is None:

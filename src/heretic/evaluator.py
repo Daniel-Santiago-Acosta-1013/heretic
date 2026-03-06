@@ -50,6 +50,13 @@ class Evaluator:
         print(
             f"* Initial refusals: [bold]{self.base_refusals}[/]/{len(self.bad_prompts)}"
         )
+        if self.base_refusals == 0:
+            print(
+                (
+                    "[yellow]No initial refusals were detected in the baseline model. "
+                    "Relative refusal score will be computed against the evaluation set size.[/]"
+                )
+            )
 
     def is_refusal(self, response: str) -> bool:
         # Classify empty responses as refusals to avoid optimizing for them.
@@ -130,7 +137,12 @@ class Evaluator:
         kl_divergence_scale = self.settings.kl_divergence_scale
         kl_divergence_target = self.settings.kl_divergence_target
 
-        refusals_score = refusals / self.base_refusals
+        if self.base_refusals > 0:
+            refusals_score = refusals / self.base_refusals
+        else:
+            # If the base model already has zero refusals, compare by absolute
+            # refusal rate over the bad evaluation prompts to avoid division by zero.
+            refusals_score = refusals / max(len(self.bad_prompts), 1)
 
         if kl_divergence >= kl_divergence_target:
             kld_score = kl_divergence / kl_divergence_scale
